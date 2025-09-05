@@ -1,15 +1,31 @@
-import { kvLPush } from "../../lib/kv.js";
+import { kvGetJSON, kvSetJSON } from "../../lib/kv.js";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
+  try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Use POST" });
+    }
 
-  const { title, bucket = "general", dueISO = new Date().toISOString(), done = false } = req.body || {};
-  if (!title) return res.status(400).json({ error: "Missing 'title'" });
+    // Be defensive about body parsing on serverless
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const day  = (body.dueISO ? new Date(body.dueISO) : new Date()).toISOString().slice(0,10);
 
-  const day = new Date(dueISO).toISOString().slice(0,10); // YYYY-MM-DD
-  const key = `tasks:${day}`;
+    const task = {
+      id: String(Date.now()),
+      title: body.title || "Untitled",
+      bucket: body.bucket || "general",
+      dueISO: body.dueISO || new Date().toISOString(),
+      done: false
+    };
 
-  const task = { id: `${Date.now()}`, title, bucket, dueISO, done };
-  await kvLPush(key, task);
-  res.status(200).json({ ok: true, task });
+    // Use one canonical JSON array per-day
+    const key = `tasks:${day}`;
+    const arr = (await kvGetJSON(key)) || [];
+    arr.push(task);
+    await kvSetJSON(key, arr);
+
+    res.status(200).json({ ok: true, task });
+  } catch (err) {
+    res.status(500).json({ error: "ADD_FAILED", detail: String(err?.message || err) });
+  }
 }

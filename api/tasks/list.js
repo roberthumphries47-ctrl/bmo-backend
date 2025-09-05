@@ -1,35 +1,30 @@
-import { kvLRange } from "../../lib/kv.js";
+import { kvGetJSON, kvLRange } from "../../lib/kv.js";
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Use GET" });
-  }
-
-  const day = new Date().toISOString().slice(0, 10);
-  const key = `tasks:${day}`;
-
-  // Fetch all tasks for today
-  const tasks = await kvLRange(key, 0, -1);
-  const parsed = tasks.map(t => (typeof t === "string" ? JSON.parse(t) : t));
-
-  // Group by bucket
-  const grouped = {};
-  for (const task of parsed) {
-    const bucket = task.bucket || "general";
-    if (!grouped[bucket]) {
-      grouped[bucket] = { completed: [], incomplete: [] };
+  try {
+    if (req.method !== "GET") {
+      return res.status(405).json({ error: "Use GET" });
     }
-    if (task.done) {
-      grouped[bucket].completed.push(task);
-    } else {
-      grouped[bucket].incomplete.push(task);
-    }
-  }
 
-  res.status(200).json({
-    day,
-    grouped,
-  });
+    const day = new Date().toISOString().slice(0,10);
+    const key = `tasks:${day}`;
+
+    // Prefer JSON array; fall back to legacy list if not present
+    let tasks = await kvGetJSON(key);
+    if (!Array.isArray(tasks)) {
+      const listItems = await kvLRange(key, 0, -1);
+      tasks = Array.isArray(listItems) ? listItems : [];
+    }
+
+    const grouped = {};
+    for (const t of tasks) {
+      const bucket = t.bucket || "general";
+      if (!grouped[bucket]) grouped[bucket] = { completed: [], incomplete: [] };
+      (t.done ? grouped[bucket].completed : grouped[bucket].incomplete).push(t);
+    }
+
+    res.status(200).json({ day, grouped });
+  } catch (err) {
+    res.status(500).json({ error: "LIST_FAILED", detail: String(err?.message || err) });
+  }
 }
-
-
