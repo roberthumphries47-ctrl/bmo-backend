@@ -1,3 +1,4 @@
+// api/tasks/list.js
 import { kvGetJSON, kvLRange } from "../../lib/kv.js";
 
 export default async function handler(req, res) {
@@ -6,8 +7,13 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Use GET" });
     }
 
-    const day = new Date().toISOString().slice(0,10);
-    const key = `tasks:${day}`;
+    // Support ?day=YYYY-MM-DD (defaults to today)
+    const queryDay = req.query.day;
+    const day = queryDay && /^\d{4}-\d{2}-\d{2}$/.test(queryDay)
+      ? queryDay
+      : new Date().toISOString().slice(0, 10);
+
+    const key = `tasks_array:${day}`;
 
     // Prefer JSON array; fall back to legacy list if not present
     let tasks = await kvGetJSON(key);
