@@ -1,137 +1,134 @@
 // api/digest/morning.js
 import { kvGetJSON, kvLRange } from "../../lib/kv.js";
 
-function isoDay(d = new Date()) {
-  return new Date(d).toISOString().slice(0, 10);
-}
-function daysFrom(baseISO, n) {
-  const d = new Date(baseISO + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return isoDay(d);
-}
-function withinDays(targetISO, baseISO, maxDays) {
-  const t = new Date(targetISO).getTime();
-  const b = new Date(baseISO + "T00:00:00Z").getTime();
-  const diffDays = Math.floor((t - b) / (24 * 3600 * 1000));
-  return diffDays >= 0 && diffDays <= maxDays;
-}
-
+/**
+ * Morning digest:
+ * - Reads today's tasks (array/fallback) and shows active quests by guild
+ * - Reads seeded calendar/bills/subscriptions (same keys you already used)
+ * - Returns structured data + RPG-flavored human message
+ */
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Use GET" });
 
-  const url = new URL(req.url, "http://localhost");
-  const day = url.searchParams.get("day") || isoDay(); // allow ?day=YYYY-MM-DD for testing
+  const day = (req.query.day || new Date().toISOString().slice(0, 10));
 
-  // ---- Appointments (seeded under key: calendar:YYYY-MM-DD)
-  const appointments =
-    (await kvGetJSON(`calendar:${day}`))?.value || []; // seed stores {value:[...]}
-
-  // ---- Tasks for today (we support both storage shapes)
-  // 1) array under tasks_array:YYYY-MM-DD
-  // 2) list under tasks:YYYY-MM-DD (fallback)
-  let tasks = (await kvGetJSON(`tasks_array:${day}`)) || null;
-  if (!tasks) {
-    const rr = await kvLRange(`tasks:${day}`, 0, -1);
-    tasks = rr.map((t) => (typeof t === "string" ? JSON.parse(t) : t));
+  // Quests today
+  let tasks = (await kvGetJSON(`tasks_array:${day}`)) ?? [];
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    const legacy = await kvLRange(`tasks:${day}`, 0, -1);
+    tasks = (legacy ?? []).map((t) => (typeof t === "string" ? JSON.parse(t) : t));
+  }
+  const grouped = {};
+  for (const t of tasks) {
+    const bucket = t.bucket || "general";
+    if (!grouped[bucket]) grouped[bucket] = { completed: [], incomplete: [] };
+    (t.done ? grouped[bucket].completed : grouped[bucket].incomplete).push(t);
   }
 
-  // ---- Bills: scan next 30 days for any bills:bYYYY-MM-DD keys (seed shape)
-  const bills = [];
-  for (let i = 0; i <= 30; i++) {
-    const d = daysFrom(day, i);
-    const b = await kvGetJSON(`bills:${d}`);
-    if (b && b.name) bills.push(b);
-  }
-  // highlight if due within 14 days
-  const highlightedBills = bills.map((b) => ({
-    ...b,
-    highlight: withinDays(b.dueISO, day, 14),
-  }));
+  // Calendar / Bills / Subscriptions (from your dev seed or future integrations)
+  const calendar = (await kvGetJSON(`calendar:${day}`)) ?? [];              // [{title,startISO,endISO,location}]
+  const bills = (await kvGetJSON("bills")) ?? [];                           // [{name,amount,dueISO}]
+  const subs = (await kvGetJSON("subscriptions")) ?? [];                    // [{name,plan,price,renewISO,priceChange?}]
 
-  // ---- Subscriptions: one array in key "subscriptions" (seed shape)
-  const subsAll = (await kvGetJSON("subscriptions")) || [];
-  const subsNext30 = subsAll.filter((s) => withinDays(s.renewISO, day, 30));
-
-  // ---- Build human-friendly message
-  const lines = [];
-  lines.push(`Morning Digest – ${day}`);
-  lines.push("");
-
-  // Appointments
-  lines.push("Appointments (today)");
-  if (!appointments.length) {
-    lines.push("• None");
-  } else {
-    for (const a of appointments) {
-      // a = { title, startISO, endISO, location }
-      const time = new Date(a.startISO).toISOString().slice(11, 16); // HH:MM (UTC)
-      lines.push(`• ${a.title} — ${time}${a.location ? ` @ ${a.location}` : ""}`);
-    }
-  }
-  lines.push("");
-
-  // Tasks (incomplete only)
-  const incomplete = tasks.filter((t) => !t.done);
-  lines.push("Tasks (incomplete)");
-  if (!incomplete.length) {
-    lines.push("• None");
-  } else {
-    // group by bucket
-    const grouped = {};
-    for (const t of incomplete) {
-      const b = t.bucket || "general";
-      (grouped[b] ||= []).push(t);
-    }
-    for (const [bucket, arr] of Object.entries(grouped)) {
-      lines.push(`• ${bucket}: ${arr.map((t) => t.title).join(", ")}`);
-    }
-  }
-  lines.push("");
-
-  // Bills
-  lines.push("Bills (upcoming)");
-  if (!highlightedBills.length) {
-    lines.push("• None detected");
-  } else {
-    for (const b of highlightedBills) {
-      const due = b.dueISO?.slice(0, 10);
-      lines.push(
-        `• ${b.name} — $${Number(b.amount).toFixed(2)} — due ${due}${
-          b.highlight ? " ⚠️" : ""
-        }`
-      );
-    }
-  }
-  lines.push("");
-
-  // Subscriptions
-  lines.push("Finances → Subscriptions (next 30 days)");
-  if (!subsNext30.length) {
-    lines.push("• None in the next 30 days");
-  } else {
-    for (const s of subsNext30) {
-      const due = s.renewISO?.slice(0, 10);
-      const price = s.price != null ? `$${Number(s.price).toFixed(2)}` : "";
-      const pc =
-        s.priceChange && s.priceChange.from != null && s.priceChange.to != null
-          ? ` (price change: $${Number(s.priceChange.from).toFixed(2)} → $${Number(
-              s.priceChange.to
-            ).toFixed(2)} on ${s.priceChange.effectiveISO?.slice(0, 10)})`
-          : "";
-      lines.push(`• ${s.name} — ${s.plan || ""} ${price} — renews ${due}${pc}`);
-    }
-  }
-  lines.push("");
-  lines.push("Add any new tasks for today?");
-
-  const message = lines.join("\n");
+  const human = buildRPGMorning(day, grouped, calendar, bills, subs);
 
   return res.status(200).json({
     day,
-    appointments,
-    tasks,
-    bills: highlightedBills,
-    subscriptions: subsNext30,
-    message,
+    grouped,
+    calendar,
+    bills,
+    subscriptions: subs,
+    message: human,
   });
+}
+
+function buildRPGMorning(day, grouped, calendar, bills, subs) {
+  const lines = [];
+  lines.push(`📜 Quest Board — ${day}`);
+  lines.push("");
+
+  // Appointments
+  lines.push("🏰 Appointments (today)");
+  if (calendar.length === 0) {
+    lines.push("• None");
+  } else {
+    for (const e of calendar) lines.push(`• ${briefTime(e.startISO)} — ${e.title}${e.location ? ` @ ${e.location}` : ""}`);
+  }
+  lines.push("");
+
+  // Active quests
+  lines.push("🗺️  Active Quests (incomplete)");
+  let anyActive = false;
+  for (const [bucket, g] of Object.entries(grouped)) {
+    const inc = g.incomplete;
+    if (inc.length) {
+      anyActive = true;
+      lines.push(`• ${prettyGuild(bucket)}:`);
+      for (const q of inc) lines.push(`   - ${q.title}`);
+    }
+  }
+  if (!anyActive) lines.push("• None");
+  lines.push("");
+
+  // Bills (next 30 days) with 14-day highlight
+  lines.push("💰 Bills (upcoming)");
+  if (bills.length === 0) {
+    lines.push("• None detected");
+  } else {
+    const now = Date.now();
+    const in30 = now + 30 * 24 * 3600 * 1000;
+    const in14 = now + 14 * 24 * 3600 * 1000;
+    const upcoming = bills
+      .map((b) => ({ ...b, ts: Date.parse(b.dueISO) }))
+      .filter((b) => !Number.isNaN(b.ts) && b.ts <= in30)
+      .sort((a, b) => a.ts - b.ts);
+    if (upcoming.length === 0) {
+      lines.push("• None in the next 30 days");
+    } else {
+      for (const b of upcoming) {
+        const urgent = b.ts <= in14 ? " ⚠️" : "";
+        lines.push(`• ${b.name} — $${Number(b.amount ?? 0).toFixed(2)} — due ${b.dueISO.slice(0, 10)}${urgent}`);
+      }
+    }
+  }
+  lines.push("");
+
+  // Subscriptions (next 30 days) + price changes
+  lines.push("🏷️  Finances → Subscriptions (next 30 days)");
+  if (subs.length === 0) {
+    lines.push("• None in the next 30 days");
+  } else {
+    const now = Date.now();
+    const in30 = now + 30 * 24 * 3600 * 1000;
+    const upcoming = subs
+      .map((s) => ({ ...s, ts: Date.parse(s.renewISO) }))
+      .filter((s) => !Number.isNaN(s.ts) && s.ts <= in30)
+      .sort((a, b) => a.ts - b.ts);
+
+    if (upcoming.length === 0) {
+      lines.push("• None in the next 30 days");
+    } else {
+      for (const s of upcoming) {
+        const price = s.price != null ? `$${Number(s.price).toFixed(2)}` : "—";
+        const pc = s.priceChange ? ` (price change: ${fmtPriceChange(s.priceChange)})` : "";
+        lines.push(`• ${s.name} — ${s.plan ?? "plan"} — ${price} — renews ${s.renewISO.slice(0, 10)}${pc}`);
+      }
+    }
+  }
+  lines.push("");
+  lines.push("Anything to add to today’s quest list? Tell me the title (and optional guild/bucket).");
+  return lines.join("\n");
+}
+
+function prettyGuild(bucket) {
+  return bucket === "general" ? "General Guild" : capitalize(bucket) + " Guild";
+}
+function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+function briefTime(iso) { return iso?.slice(11, 16) ?? ""; }
+function fmtPriceChange(pc) {
+  if (typeof pc === "string") return pc;
+  if (pc && typeof pc === "object" && pc.from != null && pc.to != null) {
+    return `$${Number(pc.from).toFixed(2)} → $${Number(pc.to).toFixed(2)}`;
+  }
+  return "updated";
 }
