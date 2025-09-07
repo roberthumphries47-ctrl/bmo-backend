@@ -1,7 +1,6 @@
 // api/digest/morning.js
 import { kvGetJSON, kvLRange } from "../../lib/kv.js";
 
-// Canonical bucket slugs in storage -> display names (Cyberpunk streetkid skin)
 const BUCKET_LABELS = {
   finances: "Cred Sharks",
   house: "Safehouse",
@@ -19,7 +18,6 @@ const BUCKET_LABELS = {
 function todayISO() { return new Date().toISOString().slice(0,10); }
 function hhmm(iso) { return iso?.slice(11,16) ?? ""; }
 function labelFor(bucket) {
-  // fall back to “Ghosts” if someone invents a new bucket on the fly
   return BUCKET_LABELS[bucket?.toLowerCase()] || BUCKET_LABELS.uncategorized;
 }
 
@@ -28,14 +26,12 @@ export default async function handler(req, res) {
 
   const day = (req.query.day && String(req.query.day)) || todayISO();
 
-  // Tasks for the day (array first; fallback to legacy list)
   let tasks = (await kvGetJSON(`tasks_array:${day}`)) ?? [];
   if (!Array.isArray(tasks) || tasks.length === 0) {
     const legacy = await kvLRange(`tasks:${day}`, 0, -1);
     tasks = (legacy ?? []).map(v => typeof v === "string" ? safeJSON(v) : v).filter(Boolean);
   }
 
-  // Group by bucket and split status
   const grouped = {};
   for (const t of tasks) {
     const bucket = (t.bucket || "uncategorized").toLowerCase();
@@ -46,16 +42,14 @@ export default async function handler(req, res) {
     });
   }
 
-  // Calendar / bills / subscriptions use your existing seed keys
-  const calendar = (await kvGetJSON(`calendar:${day}`)) ?? []; // [{title,startISO,endISO,location}]
-  const bills = (await kvGetJSON("bills")) ?? [];              // [{name,amount,dueISO}]
-  const subs  = (await kvGetJSON("subscriptions")) ?? [];      // [{name,plan,price,renewISO,priceChange?}]
+  const calendar = (await kvGetJSON(`calendar:${day}`)) ?? [];
+  const bills = (await kvGetJSON("bills")) ?? [];
+  const subs  = (await kvGetJSON("subscriptions")) ?? [];
 
-  // Build message (streetkid cyberpunk)
   const lines = [];
-  lines.push(`[ OPERATOR’S FEED // ${day} ]`);
+  lines.push(`[ MORNING UPLOAD // ${day} ]`);
   lines.push("");
-  lines.push("Meets:");
+  lines.push("Time Slots:");
   if (!calendar.length) {
     lines.push(" • None");
   } else {
@@ -64,7 +58,7 @@ export default async function handler(req, res) {
     }
   }
   lines.push("");
-  lines.push("Gigs by Division:");
+  lines.push("Active Gigs:");
   const hasAnyGig = Object.values(grouped).some(g => g.incomplete.length > 0);
   if (!hasAnyGig) {
     lines.push(" • None");
@@ -79,7 +73,6 @@ export default async function handler(req, res) {
     }
   }
   lines.push("");
-  // Bills within 30 days, flag <=14 days
   lines.push("Cred Tabs (upcoming):");
   const now = Date.now();
   const in30 = now + 30*24*3600*1000;
@@ -98,7 +91,6 @@ export default async function handler(req, res) {
     }
   }
   lines.push("");
-  // Subscriptions next 30 days
   lines.push("Fixer Retainers (next 30 days):");
   const upcomingSubs = subs
     .map(s => ({...s, ts: Date.parse(s.renewISO)}))
@@ -116,18 +108,18 @@ export default async function handler(req, res) {
     }
   }
   lines.push("");
-  lines.push("New gig for today? Say: “New Gig: <title> in <division> due <date>”");
+  lines.push("Queue any new gigs for today?");
 
   const message = lines.join("\n");
 
   return res.status(200).json({
     day,
-    grouped,          // with display names as keys
+    grouped,
     calendar,
     bills: upcomingBills,
     subscriptions: upcomingSubs,
     message,
-    bucketLabels: BUCKET_LABELS, // expose mapping for the app UI
+    bucketLabels: BUCKET_LABELS,
   });
 }
 
