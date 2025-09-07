@@ -1,105 +1,72 @@
 // api/recap/nightly.js
 import { kvGetJSON, kvSetJSON } from "../../lib/kv.js";
 
-// YYYY-MM-DD (UTC)
-function ymd(date = new Date()) {
-  return new Date(Date.UTC(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate()
-  )).toISOString().slice(0, 10);
+function isoDay(d = new Date()) {
+  return new Date(d).toISOString().slice(0, 10);
 }
-function addDays(dayStr, n) {
-  const [y, m, d] = dayStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  return ymd(dt);
-}
-function eodISO(dayStr) {
-  return `${dayStr}T23:59:00Z`;
+function daysFrom(baseISO, n) {
+  const d = new Date(baseISO + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return isoDay(d);
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET" && req.method !== "POST") {
-    return res.status(405).json({ error: "Use GET or POST" });
+  if (req.method !== "GET") return res.status(405).json({ error: "Use GET" });
+
+  const today = isoDay();
+  const tomorrow = daysFrom(today, 1);
+
+  // Load today's task array
+  const tasks = (await kvGetJSON(`tasks_array:${today}`)) || [];
+
+  // Split into completed and incomplete
+  const completed = tasks.filter((t) => t.done);
+  const incomplete = tasks.filter((t) => !t.done);
+
+  // Roll incomplete forward automatically
+  if (incomplete.length > 0) {
+    const tomorrowTasks = (await kvGetJSON(`tasks_array:${tomorrow}`)) || [];
+    const rolled = [
+      ...tomorrowTasks,
+      ...incomplete.map((t) => ({ ...t, rolled: true })),
+    ];
+    await kvSetJSON(`tasks_array:${tomorrow}`, rolled);
   }
 
-  const today = (typeof req.query.day === "string" && req.query.day) || ymd();
-  const tomorrow = addDays(today, 1);
-
-  const keyToday = `tasks_array:${today}`;
-  const keyTomorrow = `tasks_array:${tomorrow}`;
-
-  const todayArr = (await kvGetJSON(keyToday)) || [];
-  const tomorrowArr = (await kvGetJSON(keyTomorrow)) || [];
-
-  // Group by bucket; split completed/incomplete
-  const grouped = {};
-  const incomplete = [];
-  for (const t of todayArr) {
-    const bucket = t.bucket || "general";
-    if (!grouped[bucket]) grouped[bucket] = { completed: [], incomplete: [] };
-    if (t.done) grouped[bucket].completed.push(t);
-    else {
-      grouped[bucket].incomplete.push(t);
-      incomplete.push(t);
-    }
-  }
-
-  // Roll over all incomplete to tomorrow (no dupes)
-  let rolledCount = 0;
-  if (incomplete.length) {
-    const existingTomorrow = new Map((tomorrowArr || [])
-      .filter(x => x && x.id)
-      .map(x => [String(x.id), x])
-    );
-
-    for (const t of incomplete) {
-      const id = String(t.id || "");
-      if (!id || existingTomorrow.has(id)) continue;
-      const rolled = { ...t, done: false };
-      const dueDay = t.dueISO ? String(t.dueISO).slice(0, 10) : null;
-      if (!dueDay || dueDay <= today) rolled.dueISO = eodISO(tomorrow);
-      tomorrowArr.push(rolled);
-      existingTomorrow.set(id, rolled);
-      rolledCount++;
-    }
-    await kvSetJSON(keyTomorrow, tomorrowArr);
-  }
-
-  // Human readable message
+  // Build human-friendly message
   const lines = [];
-  lines.push(`Nightly recap for ${today}`);
+  lines.push(`Nightly Recap for ${today}`);
   lines.push("");
-  if (Object.keys(grouped).length === 0) {
-    lines.push("No items today.");
+
+  lines.push("Completed:");
+  if (!completed.length) {
+    lines.push("• None");
   } else {
-    for (const bucket of Object.keys(grouped).sort()) {
-      const g = grouped[bucket];
-      lines.push(`• ${bucket}: ${g.completed.length} completed, ${g.incomplete.length} incomplete`);
+    for (const t of completed) {
+      lines.push(`• ${t.title} (${t.bucket || "general"})`);
     }
   }
   lines.push("");
-  if (rolledCount > 0) {
-    lines.push(`Rolled over ${rolledCount} item${rolledCount === 1 ? "" : "s"} to ${tomorrow}.`);
-    lines.push("");
-    lines.push("Options for rolled tasks:");
+
+  lines.push("Incomplete (rolled to tomorrow):");
+  if (!incomplete.length) {
+    lines.push("• None");
+  } else {
     for (const t of incomplete) {
-      lines.push(`- ${t.title} (bucket: ${t.bucket || "general"})`);
-      lines.push(`   • Roll over (default, already done)`);
-      lines.push(`   • Reschedule → POST /api/tasks/update { id: "${t.id}", action: "reschedule", newDate: "YYYY-MM-DDT23:59:00Z" }`);
-      lines.push(`   • Delete → POST /api/tasks/update { id: "${t.id}", action: "delete" }`);
-      lines.push("");
+      lines.push(`• ${t.title} (${t.bucket || "general"})`);
     }
-  } else {
-    lines.push("No items to roll. Nice work!");
   }
+  lines.push("");
+  lines.push("Need to reschedule or delete any rolled tasks?");
+
+  const message = lines.join("\n");
 
   return res.status(200).json({
     today,
     tomorrow,
-    grouped,
-    rolledCount,
-    message: lines.join("\n")
+    completed,
+    rolled: incomplete,
+    rolledCount: incomplete.length,
+    message,
   });
 }
