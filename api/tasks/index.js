@@ -1,72 +1,78 @@
 // api/tasks/index.js
-import { kvGetArray, kvSetArray } from "../../../lib/kv.js";
-import { ensureDay, uid, groupByBucket } from "../../../lib/utils.js";
-import { labels } from "../../../lib/buckets.js";
+import { kvSetJSON, kvGetJSON, kvLRange } from '../../lib/kv.js';
+
+const todayKey = () => `tasks:${new Date().toISOString().slice(0,10)}`;
+
+// normalize storage: keep an array per day under tasks:<YYYY-MM-DD>
+async function readDay(key) {
+  const arr = await kvGetJSON(key);
+  if (Array.isArray(arr)) return arr;
+  // if we previously wrote a list via kvLRange, fold it into array
+  const list = await kvLRange(key, 0, -1);
+  if (Array.isArray(list) && list.length) {
+    const parsed = list.map(x => (typeof x === 'string' ? JSON.parse(x) : x));
+    await kvSetJSON(key, parsed);
+    return parsed;
+  }
+  return [];
+}
 
 export default async function handler(req, res) {
-  const day = ensureDay(req);
+  const key = todayKey();
 
-  // GET -> list tasks (optionally by day)
-  if (req.method === "GET") {
-    const items = await kvGetArray(`tasks_array:${day}`);
-    const grouped = groupByBucket(items);
-    return res.status(200).json({ day, grouped, raw: items });
+  // GET => list today's tasks
+  if (req.method === 'GET') {
+    const items = await readDay(key);
+
+    // group by bucket for convenience
+    const grouped = {};
+    for (const t of items) {
+      const b = t.bucket || 'general';
+      grouped[b] ??= { completed: [], incomplete: [] };
+      (t.done ? grouped[b].completed : grouped[b].incomplete).push(t);
+    }
+
+    return res.status(200).json({
+      day: key.slice('tasks:'.length),
+      grouped,
+    });
   }
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Use GET or POST" });
+  // POST => add or complete
+  if (req.method === 'POST') {
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { body = {}; }
+    }
+
+    const action = body.action || 'add';
+
+    if (action === 'add') {
+      const id = Date.now().toString();
+      const task = {
+        id,
+        title: body.title || 'Untitled',
+        bucket: body.bucket || 'general',
+        dueISO: body.dueISO ?? null,
+        done: false,
+      };
+      const items = await readDay(key);
+      items.push(task);
+      await kvSetJSON(key, items);
+      return res.status(200).json({ ok: true, task });
+    }
+
+    if (action === 'complete') {
+      const { id } = body;
+      if (!id) return res.status(400).json({ error: 'Missing id' });
+      const items = await readDay(key);
+      const updated = items.map(t => (t.id === id ? { ...t, done: true } : t));
+      await kvSetJSON(key, updated);
+      return res.status(200).json({ ok: true });
+    }
+
+    return res.status(400).json({ error: 'Unknown action' });
   }
 
-  let body = {};
-  try { body = typeof req.body === "string" ? JSON.parse(req.body) : req.body; } catch {}
-  const action = (body.action || "add").toLowerCase();
-
-  // Load today's list
-  const key = `tasks_array:${day}`;
-  const items = await kvGetArray(key);
-
-  if (action === "add") {
-    // { title, bucket, dueISO }
-    const task = {
-      id: uid(),
-      title: body.title || "Untitled",
-      bucket: (body.bucket || "general").toLowerCase(),
-      dueISO: body.dueISO || null,
-      done: false
-    };
-    items.push(task);
-    await kvSetArray(key, items);
-    return res.status(200).json({ ok: true, task });
-  }
-
-  if (action === "complete") {
-    // { id }
-    const idx = items.findIndex(t => t.id === body.id);
-    if (idx === -1) return res.status(404).json({ error: "Not found" });
-    items[idx] = { ...items[idx], done: true };
-    await kvSetArray(key, items);
-    return res.status(200).json({ ok: true, id: body.id });
-  }
-
-  if (action === "update") {
-    // { id, ...fields }
-    const idx = items.findIndex(t => t.id === body.id);
-    if (idx === -1) return res.status(404).json({ error: "Not found" });
-    items[idx] = { ...items[idx], ...body };
-    await kvSetArray(key, items);
-    return res.status(200).json({ ok: true, task: items[idx] });
-  }
-
-  if (action === "reset") {
-    await kvSetArray(key, []);
-    return res.status(200).json({ ok: true, cleared: day });
-  }
-
-  // Optional: list via POST
-  if (action === "list") {
-    const grouped = groupByBucket(items);
-    return res.status(200).json({ day, grouped, raw: items });
-  }
-
-  return res.status(400).json({ error: "Unknown action" });
+  return res.status(405).json({ error: 'Use GET or POST' });
 }
