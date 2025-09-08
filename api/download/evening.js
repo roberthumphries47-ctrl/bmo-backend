@@ -1,56 +1,33 @@
-// api/download/evening.js
-import { kvGetArray, kvSetArray } from '../../lib/kv.js';
-import { ensureDay, tomorrowISO, groupByBucket } from '../../lib/utils.js';
-import { labels, terms } from '../../lib/buckets.js';
-
+// TEMP DEBUG: Evening Download -> dump env + ping Upstash KV
 export default async function handler(req, res) {
+  const env = {
+    KV_URL: process.env.KV_URL ?? null,
+    KV_REST_API_URL: process.env.KV_REST_API_URL ?? null,
+    KV_REST_API_TOKEN: process.env.KV_REST_API_TOKEN ? "set" : null,
+    REDIS_URL: process.env.REDIS_URL ?? null,
+  };
+
+  let ping = { tried: false };
   try {
-    if (req.method !== 'GET') return res.status(405).json({ error: 'Use GET' });
-
-    const today = ensureDay(req);
-    const tomorrow = tomorrowISO(new Date(`${today}T00:00:00Z`)).slice(0,10);
-
-    const todayKey = `tasks_array:${today}`;
-    const tomorrowKey = `tasks_array:${tomorrow}`;
-
-    const items = (await kvGetArray(todayKey)) || [];
-
-    // Roll over any incomplete tasks into tomorrow (non-destructive: we append)
-    const incomplete = items.filter(t => !t.done);
-    let rolledCount = 0;
-    if (incomplete.length) {
-      const tomorrowItems = (await kvGetArray(tomorrowKey)) || [];
-      const rolled = incomplete.map(t => ({ ...t, done: false })); // ensure still undone
-      await kvSetArray(tomorrowKey, [...tomorrowItems, ...rolled]);
-      rolledCount = rolled.length;
+    const base = process.env.KV_REST_API_URL;
+    const token = process.env.KV_REST_API_TOKEN;
+    if (base && token) {
+      ping.tried = true;
+      const resp = await fetch(`${base}/get/__healthcheck__`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      ping.status = resp.status;
+      ping.ok = resp.ok;
+      ping.sampleText = await resp.text();
     }
-
-    // Group (for the structured payload)
-    const grouped = groupByBucket(items);
-
-    // Human message
-    const closed = items.filter(t => t.done);
-    const lines = [];
-    lines.push(`${terms.evening} // ${today}`);
-    lines.push('');
-    lines.push('Closed:');
-    lines.push(closed.length ? closed.map(t => `• ${t.title} [${labels[t.bucket]||t.bucket||'general'}]`).join('\n') : '• None');
-    lines.push('');
-    lines.push('Loose Ends (auto-queued for tomorrow):');
-    lines.push(incomplete.length ? incomplete.map(t => `• ${t.title} → roll over`).join('\n') : '• None');
-    lines.push('');
-    lines.push('Re-slot or scrap anything? Tell me the gig title and what to do.');
-
-    const message = lines.join('\n');
-
-    return res.status(200).json({
-      today,
-      tomorrow,
-      grouped,
-      rolledCount,
-      message,
-    });
-  } catch (err) {
-    return res.status(500).json({ error: 'Evening Download failed', details: String(err?.message || err) });
+  } catch (e) {
+    ping.error = e.message;
   }
+
+  return res.status(200).json({
+    ok: true,
+    where: "evening-debug",
+    env,
+    ping
+  });
 }
