@@ -1,50 +1,62 @@
 // api/upload/morning.js
-const BASE = process.env.KV_REST_API_URL;
-const TOKEN = process.env.KV_REST_API_TOKEN;
-
-async function redis(cmdPath) {
-  if (!BASE || !TOKEN) throw new Error("Missing KV_REST_API_URL or KV_REST_API_TOKEN");
-  const url = `${BASE}${cmdPath}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  const text = await res.text();
-  try {
-    const json = JSON.parse(text);
-    return json.result ?? text;
-  } catch {
-    return text;
-  }
-}
+import { kvGetArray } from "../../lib/kv.js";
+import { ensureDay } from "../../lib/utils.js";
+import { labels } from "../../lib/buckets.js";
+import { parseGmailHighlights } from "../../lib/gmailParser.js";
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") return res.status(405).json({ error: "Use GET" });
 
-    // --- Redis health tests ---
-    const ping = await redis("/PING");                 // expect "PONG"
-    const stamp = String(Date.now());
-    await redis(`/SET/health:morning:${stamp}/${stamp}`);
-    const echo = await redis(`/GET/health:morning:${stamp}`);
+    const today = ensureDay(req);
+    const todayKey = `tasks_array:${today}`;
+    const items = (await kvGetArray(todayKey)) || [];
 
-    const env_present = Boolean(BASE && TOKEN);
-    const redis_ok = ping === "PONG" && echo === stamp;
+    // Gmail parsing (subscriptions, bills, travel, reservations, etc.)
+    const gmailHighlights = await parseGmailHighlights({
+      daysAhead: 30,
+      urgentWithin: 14,
+    });
 
     const lines = [];
-    lines.push("📤 Morning Upload");
+    lines.push("☀️ Morning Upload");
+    lines.push(`🗓️ ${today}`);
     lines.push("");
-    lines.push(`Redis PING: ${ping}`);
-    lines.push(`Write/Read OK: ${redis_ok ? "yes" : "no"}`);
+
+    // Tasks
+    lines.push("📋 Gigs:");
+    lines.push(
+      items.length
+        ? items
+            .map(
+              (t) =>
+                `• ${t.title} ${
+                  t.bucket ? `(${labels[t.bucket] || t.bucket})` : ""
+                }`
+            )
+            .join("\n")
+        : "• None"
+    );
+    lines.push("");
+
+    // Gmail Highlights
+    lines.push("📧 Gmail Highlights:");
+    if (gmailHighlights.length) {
+      gmailHighlights.forEach((g) => lines.push(`• ${g}`));
+    } else {
+      lines.push("• None");
+    }
+
+    const message = lines.join("\n");
 
     return res.status(200).json({
-      ok: redis_ok,
-      env_present,
-      redis_ok,
-      ping,
-      echo,
-      message: lines.join("\n"),
+      today,
+      tasks: items,
+      gmailHighlights,
+      message,
     });
   } catch (err) {
     return res.status(200).json({
-      ok: false,
       error: "Morning Upload failed",
       details: err?.message || String(err),
     });

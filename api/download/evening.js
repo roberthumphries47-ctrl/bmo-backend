@@ -1,50 +1,96 @@
 // api/download/evening.js
-const BASE = process.env.KV_REST_API_URL;
-const TOKEN = process.env.KV_REST_API_TOKEN;
-
-async function redis(cmdPath) {
-  if (!BASE || !TOKEN) throw new Error("Missing KV_REST_API_URL or KV_REST_API_TOKEN");
-  const url = `${BASE}${cmdPath}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  const text = await res.text();
-  try {
-    const json = JSON.parse(text);
-    return json.result ?? text;
-  } catch {
-    return text;
-  }
-}
+import { kvGetArray, kvSetArray } from "../../lib/kv.js";
+import { ensureDay, tomorrowISO } from "../../lib/utils.js";
+import { labels } from "../../lib/buckets.js";
+import { parseGmailHighlights } from "../../lib/gmailParser.js";
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") return res.status(405).json({ error: "Use GET" });
 
-    // --- Redis health tests ---
-    const ping = await redis("/PING");                 // expect "PONG"
-    const stamp = String(Date.now());
-    await redis(`/SET/health:evening:${stamp}/${stamp}`);
-    const echo = await redis(`/GET/health:evening:${stamp}`);
+    const today = ensureDay(req);
+    const tomorrow = tomorrowISO(new Date(`${today}T08:00:00Z`));
 
-    const env_present = Boolean(BASE && TOKEN);
-    const redis_ok = ping === "PONG" && echo === stamp;
+    const todayKey = `tasks_array:${today}`;
+    const tomorrowKey = `tasks_array:${tomorrow}`;
+    const items = (await kvGetArray(todayKey)) || [];
+
+    // Split
+    const closed = items.filter((t) => t?.done);
+    const incomplete = items.filter((t) => !t?.done);
+
+    // Roll over
+    if (incomplete.length) {
+      const existingTomorrow = (await kvGetArray(tomorrowKey)) || [];
+      const rolled = incomplete.map((t) => ({ ...t, done: false }));
+      await kvSetArray(tomorrowKey, [...existingTomorrow, ...rolled]);
+    }
+
+    // Gmail parsing (what came in today that matters)
+    const gmailHighlights = await parseGmailHighlights({
+      daysAhead: 2, // keep it tight for recap
+      urgentWithin: 1,
+    });
 
     const lines = [];
     lines.push("📥 Evening Download");
+    lines.push(`🗓️ ${today}`);
     lines.push("");
-    lines.push(`Redis PING: ${ping}`);
-    lines.push(`Write/Read OK: ${redis_ok ? "yes" : "no"}`);
+
+    // Completed
+    lines.push("✅ Closed:");
+    lines.push(
+      closed.length
+        ? closed
+            .map(
+              (t) =>
+                `• ${t.title} ${
+                  t.bucket ? `(${labels[t.bucket] || t.bucket})` : ""
+                }`
+            )
+            .join("\n")
+        : "• None"
+    );
+    lines.push("");
+
+    // Rolled over
+    lines.push("🔄 Loose Ends (auto-queued for tomorrow):");
+    lines.push(
+      incomplete.length
+        ? incomplete
+            .map(
+              (t) =>
+                `• ${t.title} ${
+                  t.bucket ? `(${labels[t.bucket] || t.bucket})` : ""
+                }`
+            )
+            .join("\n")
+        : "• None"
+    );
+    lines.push("");
+
+    // Gmail
+    lines.push("📧 Gmail Highlights:");
+    if (gmailHighlights.length) {
+      gmailHighlights.forEach((g) => lines.push(`• ${g}`));
+    } else {
+      lines.push("• None");
+    }
+    lines.push("");
+
+    lines.push("Re-slot or scrap anything? Tell me the gig title and what to do.");
+
+    const message = lines.join("\n");
 
     return res.status(200).json({
-      ok: redis_ok,
-      env_present,
-      redis_ok,
-      ping,
-      echo,
-      message: lines.join("\n"),
+      today,
+      closed,
+      rolledCount: incomplete.length,
+      gmailHighlights,
+      message,
     });
   } catch (err) {
     return res.status(200).json({
-      ok: false,
       error: "Evening Download failed",
       details: err?.message || String(err),
     });
