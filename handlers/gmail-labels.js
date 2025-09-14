@@ -1,5 +1,5 @@
 // api/gmail/labels.js
-import { getAccessToken } from "../../lib/google.js";
+import { getAccessToken } from "../lib/google.js";
 
 export default async function handler(req, res) {
   try {

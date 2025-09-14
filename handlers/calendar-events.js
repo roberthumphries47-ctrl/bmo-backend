@@ -1,5 +1,5 @@
 // api/calendar/events.js
-import { getAccessToken } from "../../lib/google.js";
+import { getAccessToken } from "../lib/google.js";
 
 function iso(daysFromNow = 0, hour = 0) {
   const d = new Date();
