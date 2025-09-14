@@ -1,0 +1,11 @@
+{
+  "name": "bmo-backend",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev": "vercel dev",
+    "lint": "node --check api/router/index.js"
+  },
+  "dependencies": {}
+}

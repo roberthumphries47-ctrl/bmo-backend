@@ -1,0 +1,13 @@
+{
+  "rewrites": [
+    { "source": "/api/ping",               "destination": "/api/router?action=ping" },
+    { "source": "/api/upload/morning",     "destination": "/api/router?action=upload.morning" },
+    { "source": "/api/download/evening",   "destination": "/api/router?action=download.evening" },
+    { "source": "/api/debug/kv",           "destination": "/api/router?action=debug.kv" },
+    { "source": "/api/debug/kv-probe",     "destination": "/api/router?action=debug.kv-probe" },
+    { "source": "/api/tasks/add",          "destination": "/api/router?action=tasks.add" },
+    { "source": "/api/tasks/list",         "destination": "/api/router?action=tasks.list" },
+    { "source": "/api/gmail/labels",       "destination": "/api/router?action=gmail.labels" },
+    { "source": "/api/calendar/events",    "destination": "/api/router?action=calendar.events" }
+  ]
+}
