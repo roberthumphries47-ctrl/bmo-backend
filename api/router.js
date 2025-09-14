@@ -1,20 +1,18 @@
 // api/router.js
+import ping from "../handlers/ping.js";
+import uploadMorning from "../handlers/upload-morning.js";
+import downloadEvening from "../handlers/download-evening.js";
+import debugKv from "../handlers/debug-kv.js";
+import debugKvProbe from "../handlers/debug-kv-probe.js";
+import tasksAdd from "../handlers/tasks-add.js";
+import tasksList from "../handlers/tasks-list.js";
+import gmailLabels from "../handlers/gmail-labels.js";
+import calendarEvents from "../handlers/calendar-events.js";
+
 export default async function handler(req, res) {
   try {
     const url = new URL(req.url, `https://${req.headers.host}`);
     const action = url.searchParams.get("action");
-
-    // ---- static imports (bundled automatically) ----
-    const ping = (await import("../handlers/ping.js")).default;
-    const uploadMorning = (await import("../handlers/upload-morning.js")).default;
-    const downloadEvening = (await import("../handlers/download-evening.js")).default;
-    const debugKv = (await import("../handlers/debug-kv.js")).default;
-    const debugKvProbe = (await import("../handlers/debug-kv-probe.js")).default;
-    const tasksAdd = (await import("../handlers/tasks-add.js")).default;
-    const tasksList = (await import("../handlers/tasks-list.js")).default;
-    const gmailLabels = (await import("../handlers/gmail-labels.js")).default;
-    const calendarEvents = (await import("../handlers/calendar-events.js")).default;
-    // -------------------------------------------------
 
     const map = {
       "ping": ping,
@@ -29,9 +27,7 @@ export default async function handler(req, res) {
     };
 
     const fn = map[action];
-    if (!fn) {
-      return res.status(404).json({ ok: false, error: "unknown_action", action });
-    }
+    if (!fn) return res.status(404).json({ ok: false, error: "unknown_action", action });
     return await fn(req, res);
   } catch (err) {
     return res
