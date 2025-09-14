@@ -1,17 +1,13 @@
-import { kv } from "../lib/kv.js";
+// handlers/tasks-list.js
+import { kvGetArray } from "../lib/kv.js";
 
 export default async function handler(req, res) {
   try {
-    const keys = await kv.keys("task:*");
-    const results = [];
-
-    for (const key of keys) {
-      const val = await kv.get(key);
-      if (val) results.push(JSON.parse(val));
-    }
-
-    return res.status(200).json({ ok: true, count: results.length, tasks: results });
+    const day = (req.query?.day && String(req.query.day)) || new Date().toISOString().slice(0, 10);
+    const key = `tasks_array:${day}`;
+    const arr = (await kvGetArray(key)) || [];
+    return res.status(200).json({ ok: true, day, count: arr.length, tasks: arr });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: "list_failed", details: err.message });
+    return res.status(200).json({ ok: false, error: "list_failed", details: err?.message || String(err) });
   }
 }
