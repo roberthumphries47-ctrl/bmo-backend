@@ -1,38 +1,58 @@
 // api/router.js
-const table = {
-  "ping":            () => import("../handlers/ping.js"),
-  "upload.morning":  () => import("../handlers/upload-morning.js"),
-  "download.evening":() => import("../handlers/download-evening.js"),
-  "debug.kv":        () => import("../handlers/debug-kv.js"),
-  "debug.kv-probe":  () => import("../handlers/debug-kv-probe.js"),
-  "tasks.add":       () => import("../handlers/tasks-add.js"),
-  "tasks.list":      () => import("../handlers/tasks-list.js"),
-  "gmail.labels":    () => import("../handlers/gmail-labels.js"),
-  "calendar.events": () => import("../handlers/calendar-events.js"),
-};
-
 export default async function handler(req, res) {
   try {
+    // 1) Parse ?action=
     const url = new URL(req.url, `https://${req.headers.host}`);
     const action = url.searchParams.get("action");
 
-    const loader = table[action];
-    if (!loader) {
-      return res.status(404).json({ ok: false, error: "unknown_action", action });
+    // 2) Map actions -> handler module file under /handlers
+    const actionMap = {
+      "ping":               "ping.js",
+      "gmail.labels":       "gmail-labels.js",
+      "calendar.events":    "calendar-events.js",
+
+      "tasks.add":          "tasks-add.js",
+      "tasks.list":         "tasks-list.js",
+      "tasks.complete":     "tasks-complete.js",   // <-- NEW
+
+      "upload.morning":     "upload-morning.js",
+      "download.evening":   "download-evening.js", // <-- NEW
+
+      "debug.kv":           "debug-kv.js",
+      "debug.kv-probe":     "debug-kv-probe.js",
+    };
+
+    if (!action || !actionMap[action]) {
+      return res.status(400).json({ ok: false, error: "unknown_action", action });
     }
 
-    // dynamic import inside try/catch so any import-time error becomes JSON
-    const mod = await loader();
-    const fn = mod.default || mod.handler || mod;
-    if (typeof fn !== "function") {
-      return res.status(500).json({ ok: false, error: "invalid_handler", action });
+    // 3) Dynamic import of the handler module
+    let mod;
+    try {
+      mod = await import(`../handlers/${actionMap[action]}`);
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: "router_failed",
+        details: `import_failed for "${action}" -> ../handlers/${actionMap[action]}: ${e?.message || e}`
+      });
     }
-    return await fn(req, res);
+
+    if (!mod?.handler || typeof mod.handler !== "function") {
+      return res.status(500).json({
+        ok: false,
+        error: "router_failed",
+        details: `No exported 'handler' in ../handlers/${actionMap[action]}`
+      });
+    }
+
+    // 4) Delegate to the action handler
+    return await mod.handler(req, res);
   } catch (err) {
     return res.status(500).json({
       ok: false,
       error: "router_failed",
-      details: String(err?.stack || err),
+      details: err?.message || String(err),
     });
   }
 }
