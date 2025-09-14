@@ -1,4 +1,10 @@
 {
+  "functions": {
+    "api/router.js": {
+      "runtime": "nodejs18.x",
+      "includeFiles": ["handlers/**", "lib/**"]
+    }
+  },
   "rewrites": [
     { "source": "/api/ping",               "destination": "/api/router?action=ping" },
     { "source": "/api/upload/morning",     "destination": "/api/router?action=upload.morning" },
