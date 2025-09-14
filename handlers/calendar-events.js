@@ -1,74 +1,31 @@
-// api/calendar/events.js
 import { getAccessToken } from "../lib/google.js";
-
-function iso(daysFromNow = 0, hour = 0) {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + daysFromNow);
-  d.setUTCHours(hour, 0, 0, 0);
-  return d.toISOString();
-}
 
 export default async function handler(req, res) {
   try {
-    // Window: now .. +30 days, ordered by start time
+    const token = await getAccessToken();
     const timeMin = new Date().toISOString();
-    const timeMax = iso(30, 23);
+    const timeMax = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
 
-    const tok = await getAccessToken();
-    if (!tok.ok) {
-      return res.status(200).json({ ok: false, stage: "getAccessToken", ...tok });
-    }
+    const resp = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
 
-    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
-    url.searchParams.set("timeMin", timeMin);
-    url.searchParams.set("timeMax", timeMax);
-    url.searchParams.set("singleEvents", "true");
-    url.searchParams.set("orderBy", "startTime");
-    // Optional: only show not-cancelled
-    url.searchParams.set("showDeleted", "false");
-    // Reduce payload
-    url.searchParams.set("maxResults", "100");
+    if (!resp.ok) throw new Error(`Calendar API error: ${resp.status}`);
 
-    const cRes = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${tok.access_token}` },
-    });
-
-    if (!cRes.ok) {
-      const text = await cRes.text().catch(() => "");
-      return res.status(200).json({
-        ok: false,
-        stage: "calendar_events_fetch",
-        status: cRes.status,
-        details: text,
-      });
-    }
-
-    const data = await cRes.json();
-    const items = Array.isArray(data.items) ? data.items : [];
-
-    // Map a compact shape
-    const events = items.map((e) => ({
-      id: e.id,
-      summary: e.summary || "",
-      start: e.start?.dateTime || e.start?.date || null,
-      end: e.end?.dateTime || e.end?.date || null,
-      location: e.location || null,
-      status: e.status,
-      htmlLink: e.htmlLink,
+    const data = await resp.json();
+    const events = (data.items || []).map(ev => ({
+      id: ev.id,
+      summary: ev.summary,
+      start: ev.start?.date || ev.start?.dateTime,
+      end: ev.end?.date || ev.end?.dateTime,
+      location: ev.location || null,
+      status: ev.status,
+      htmlLink: ev.htmlLink
     }));
 
-    return res.status(200).json({
-      ok: true,
-      timeMin,
-      timeMax,
-      count: events.length,
-      events,
-    });
+    return res.status(200).json({ ok: true, timeMin, timeMax, count: events.length, events });
   } catch (err) {
-    return res.status(200).json({
-      ok: false,
-      error: "handler_exception",
-      details: err?.message || String(err),
-    });
+    return res.status(500).json({ ok: false, error: "calendar_events_failed", details: err.message });
   }
 }
