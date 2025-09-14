@@ -1,11 +1,11 @@
 {
   "functions": {
-    "api/**": {
+    "api/router.js": {
       "includeFiles": ["handlers/**", "lib/**"]
     }
   },
   "rewrites": [
     { "source": "/api/router", "destination": "/api/router.js" },
-    { "source": "/api/ping", "destination": "/api/ping.js" }
+    { "source": "/api/ping",   "destination": "/api/ping.js" }
   ]
 }
