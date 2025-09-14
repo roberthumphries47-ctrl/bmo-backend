@@ -1,64 +1,83 @@
 // handlers/download-evening.js
 import { kvGetArray, kvSetArray } from "../lib/kv.js";
-import { ensureDay, tomorrowISO } from "../lib/utils.js";
-import { labels } from "../lib/buckets.js";
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+function tomorrowISO(todayStr) {
+  const d = new Date(`${todayStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+const labels = {
+  "Solo Ops": "Solo Ops",
+  "Cred Sharks": "Cred Sharks",
+  "Wraiths": "Wraiths",
+  "Ripperdocs": "Ripperdocs",
+  "Scavs": "Scavs",
+  "Ghost": "Ghost",
+  "Animals": "Animals",
+  "Side Gigs": "Side Gigs",
+  "Safehouse": "Safehouse",
+  "Gut Hacks": "Gut Hacks",
+  "Lucid Studio": "Lucid Studio",
+  "Debug": "Debug",
+};
 
 export async function handler(req, res) {
   try {
-    if (req.method !== "GET") return res.status(405).json({ ok: false, error: "use_get" });
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const day = url.searchParams.get("day") || todayISO();
+    const next = tomorrowISO(day);
 
-    const today = ensureDay(req);
-    const tomorrow = tomorrowISO(new Date(`${today}T08:00:00Z`)); // keep our existing convention
-
-    const todayKey = `tasks_array:${today}`;
-    const tomorrowKey = `tasks_array:${tomorrow}`;
+    const todayKey = `tasks_array:${day}`;
+    const nextKey  = `tasks_array:${next}`;
 
     const items = (await kvGetArray(todayKey)) || [];
     const closed = items.filter(t => t?.done);
     const incomplete = items.filter(t => !t?.done);
 
-    // Roll over (clone, mark open)
     if (incomplete.length) {
-      const existingTomorrow = (await kvGetArray(tomorrowKey)) || [];
+      const existingTomorrow = (await kvGetArray(nextKey)) || [];
       const rolled = incomplete.map(t => ({ ...t, done: false }));
-      await kvSetArray(tomorrowKey, [...existingTomorrow, ...rolled]);
+      await kvSetArray(nextKey, [...existingTomorrow, ...rolled]);
     }
 
-    // Build human message (Cyberpunk style)
+    // Build human message
     const lines = [];
     lines.push("📥 Evening Download");
-    lines.push(`🗓️ ${today}`);
+    lines.push(`🗓️ ${day}`);
     lines.push("");
 
     lines.push("Closed:");
     lines.push(
       closed.length
-        ? closed.map(t => `• ${t.title}${t.bucket ? ` (${labels[t.bucket] || t.bucket})` : ""}`).join("\n")
+        ? closed.map(t => `• ${t.title} ${t.bucket ? `(${labels[t.bucket] || t.bucket})` : ""}`).join("\n")
         : "• None"
     );
     lines.push("");
 
-    lines.push("Loose Ends (auto-rolled to tomorrow):");
+    lines.push("Loose Ends (auto-queued for tomorrow):");
     lines.push(
       incomplete.length
-        ? incomplete.map(t => `• ${t.title}${t.bucket ? ` (${labels[t.bucket] || t.bucket})` : ""}`).join("\n")
+        ? incomplete.map(t => `• ${t.title} ${t.bucket ? `(${labels[t.bucket] || t.bucket})` : ""}`).join("\n")
         : "• None"
     );
     lines.push("");
 
     lines.push("Re-slot or scrap anything? Tell me the gig title and what to do.");
-
     const message = lines.join("\n");
 
     return res.status(200).json({
       ok: true,
-      today,
-      tomorrow,
+      today: day,
+      tomorrow: next,
       closedCount: closed.length,
       rolledCount: incomplete.length,
       message,
     });
   } catch (err) {
-    return res.status(200).json({ ok: false, error: "evening_failed", details: err?.message || String(err) });
+    return res.status(500).json({ ok: false, error: "download_evening_failed", details: err?.message || String(err) });
   }
 }
