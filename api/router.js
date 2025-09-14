@@ -1,37 +1,38 @@
 // api/router.js
-import ping from "../handlers/ping.js";
-import uploadMorning from "../handlers/upload-morning.js";
-import downloadEvening from "../handlers/download-evening.js";
-import debugKv from "../handlers/debug-kv.js";
-import debugKvProbe from "../handlers/debug-kv-probe.js";
-import tasksAdd from "../handlers/tasks-add.js";
-import tasksList from "../handlers/tasks-list.js";
-import gmailLabels from "../handlers/gmail-labels.js";
-import calendarEvents from "../handlers/calendar-events.js";
+const table = {
+  "ping":            () => import("../handlers/ping.js"),
+  "upload.morning":  () => import("../handlers/upload-morning.js"),
+  "download.evening":() => import("../handlers/download-evening.js"),
+  "debug.kv":        () => import("../handlers/debug-kv.js"),
+  "debug.kv-probe":  () => import("../handlers/debug-kv-probe.js"),
+  "tasks.add":       () => import("../handlers/tasks-add.js"),
+  "tasks.list":      () => import("../handlers/tasks-list.js"),
+  "gmail.labels":    () => import("../handlers/gmail-labels.js"),
+  "calendar.events": () => import("../handlers/calendar-events.js"),
+};
 
 export default async function handler(req, res) {
   try {
     const url = new URL(req.url, `https://${req.headers.host}`);
     const action = url.searchParams.get("action");
 
-    const map = {
-      "ping": ping,
-      "upload.morning": uploadMorning,
-      "download.evening": downloadEvening,
-      "debug.kv": debugKv,
-      "debug.kv-probe": debugKvProbe,
-      "tasks.add": tasksAdd,
-      "tasks.list": tasksList,
-      "gmail.labels": gmailLabels,
-      "calendar.events": calendarEvents,
-    };
+    const loader = table[action];
+    if (!loader) {
+      return res.status(404).json({ ok: false, error: "unknown_action", action });
+    }
 
-    const fn = map[action];
-    if (!fn) return res.status(404).json({ ok: false, error: "unknown_action", action });
+    // dynamic import inside try/catch so any import-time error becomes JSON
+    const mod = await loader();
+    const fn = mod.default || mod.handler || mod;
+    if (typeof fn !== "function") {
+      return res.status(500).json({ ok: false, error: "invalid_handler", action });
+    }
     return await fn(req, res);
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "router_failed", details: String(err?.stack || err) });
+    return res.status(500).json({
+      ok: false,
+      error: "router_failed",
+      details: String(err?.stack || err),
+    });
   }
 }
