@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/router.js": {
-      "includeFiles": ["handlers/**", "lib/**"]
+      "includeFiles": "{handlers,lib}/**"
     }
   },
   "rewrites": [
