@@ -4,10 +4,8 @@ import { kvGetArray } from "../lib/kv.js";
 const ISO = (d) => d.toISOString().slice(0, 10);
 const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
 const fmt = (iso) => {
-  try {
-    const [y, m, d] = iso.split("-").map(Number);
-    return `${m}/${d}`;
-  } catch { return iso; }
+  try { const [y, m, d] = iso.split("-").map(Number); return `${m}/${d}`; }
+  catch { return iso; }
 };
 const firstDollar = (s = "") => {
   const m = (s || "").match(/\$\s*[\d,.]+/);
@@ -22,9 +20,16 @@ function baseURL(req) {
   const host = req?.headers?.host;
   return host ? `https://${host}` : "";
 }
+function todayKey(date = new Date()) { return `tasks_array:${ISO(date)}`; }
 
-function todayKey(date = new Date()) {
-  return `tasks_array:${ISO(date)}`;
+// De-duplicate by title+bucket
+function dedupeTasks(arr = []) {
+  const map = new Map();
+  for (const t of Array.isArray(arr) ? arr : []) {
+    const key = `${(t.title || "").trim().toLowerCase()}__${(t.bucket || "").trim().toLowerCase()}`;
+    if (!map.has(key)) map.set(key, t);
+  }
+  return Array.from(map.values());
 }
 
 export async function handler(req, res) {
@@ -34,7 +39,8 @@ export async function handler(req, res) {
   const next30 = ISO(addDays(now, 30));
 
   // --- Tasks (today) ---
-  const tasks = await kvGetArray(todayKey(now));
+  const tasksRaw = await kvGetArray(todayKey(now));
+  const tasks = dedupeTasks(tasksRaw);
 
   // --- Calendar (we already have a router that returns next 30 days) ---
   let allNext30 = [];
@@ -42,12 +48,8 @@ export async function handler(req, res) {
     const url = `${baseURL(req)}/api/router?action=calendar.events`;
     const r = await fetch(url);
     const data = await r.json();
-    if (data?.ok && Array.isArray(data.events)) {
-      allNext30 = data.events;
-    }
-  } catch {
-    // keep empty; digest stays resilient
-  }
+    if (data?.ok && Array.isArray(data.events)) allNext30 = data.events;
+  } catch { /* ignore */ }
 
   // --- Appointments: next 24h ---
   const appts = allNext30.filter((e) => e?.start >= today && e?.start < next24);
@@ -57,20 +59,14 @@ export async function handler(req, res) {
     (e) => e?.start === today && /\$\s*[\d,.]+/.test(e?.summary || "")
   );
 
-  // --- Subscriptions (next 30d): look for renewals/price changes/etc. ---
+  // --- Subscriptions (next 30d) ---
   const subsRaw = allNext30
     .filter((e) => e?.start >= today && e?.start <= next30 && looksLikeSub(e?.summary || ""))
     .map((e) => {
       const amount = firstDollar(e.summary);
       const dueSoon = e.start <= ISO(addDays(now, 14));
-      return {
-        date: e.start,
-        summary: e.summary || "(no title)",
-        amount,
-        dueSoon,
-      };
+      return { date: e.start, summary: e.summary || "(no title)", amount, dueSoon };
     })
-    // sort by date ascending
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   // --- Build message ---
@@ -79,12 +75,10 @@ export async function handler(req, res) {
   lines.push(`🗓️ ${today}`);
   lines.push("");
 
-  // Tasks
+  // Tasks (de-duped)
   lines.push(`📋 Gigs Today (${tasks.length})`);
   if (tasks.length) {
-    lines.push(
-      ...tasks.map((t) => `• ${t.title}${t.bucket ? ` (${t.bucket})` : ""}`)
-    );
+    lines.push(...tasks.map((t) => `• ${t.title}${t.bucket ? ` (${t.bucket})` : ""}`));
   } else {
     lines.push("• None");
   }
@@ -102,9 +96,7 @@ export async function handler(req, res) {
   // Bills today
   lines.push(`💸 Bills Today (${billsToday.length})`);
   if (billsToday.length) {
-    lines.push(
-      ...billsToday.map((b) => `• ${b.summary} — ${fmt(b.start)}`)
-    );
+    lines.push(...billsToday.map((b) => `• ${b.summary} — ${fmt(b.start)}`));
   } else {
     lines.push("• None");
   }
@@ -115,9 +107,7 @@ export async function handler(req, res) {
   if (subsRaw.length) {
     lines.push(
       ...subsRaw.map((s) =>
-        `• ${s.summary} — ${fmt(s.date)}${s.amount ? ` (${s.amount})` : ""}${
-          s.dueSoon ? "  ‼️ due ≤14d" : ""
-        }`
+        `• ${s.summary} — ${fmt(s.date)}${s.amount ? ` (${s.amount})` : ""}${s.dueSoon ? "  ‼️ due ≤14d" : ""}`
       )
     );
   } else {
