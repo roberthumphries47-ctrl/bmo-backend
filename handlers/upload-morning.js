@@ -1,136 +1,120 @@
-import { kvGetArray } from "../lib/kv.js";
+// handlers/upload-morning.js
+import { kvGetArray, kvGet } from "../lib/kv.js";
+import { ensureDay } from "../lib/utils.js";
+import { getAccessToken, calendarListEvents } from "../lib/google.js";
+import { labels } from "../lib/buckets.js";
 
-// ---- helpers ----
-const ISO = (d) => d.toISOString().slice(0, 10);
-const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
-const fmt = (iso) => {
-  try { const [y, m, d] = iso.split("-").map(Number); return `${m}/${d}`; }
-  catch { return iso; }
-};
-const firstDollar = (s = "") => {
-  const m = (s || "").match(/\$\s*[\d,.]+/);
-  return m ? m[0].replace(/\s+/g, "") : null;
-};
-const looksLikeSub = (s = "") =>
-  /(renew|subscription|trial|auto\s*pay|autopay|membership|plan|invoice|payment due)/i.test(s);
-
-// Build a base URL that works on Vercel
-function baseURL(req) {
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  const host = req?.headers?.host;
-  return host ? `https://${host}` : "";
-}
-function todayKey(date = new Date()) { return `tasks_array:${ISO(date)}`; }
-
-// De-duplicate by title+bucket
-function dedupeTasks(arr = []) {
-  const map = new Map();
-  for (const t of Array.isArray(arr) ? arr : []) {
-    const key = `${(t.title || "").trim().toLowerCase()}__${(t.bucket || "").trim().toLowerCase()}`;
-    if (!map.has(key)) map.set(key, t);
-  }
-  return Array.from(map.values());
+function toISODate(d) { return new Date(d).toISOString().slice(0,10); }
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function daysUntil(dateISO) {
+  const a = new Date(toISODate(new Date()));
+  const b = new Date(dateISO);
+  return Math.ceil((b - a) / (24*3600*1000));
 }
 
 export async function handler(req, res) {
-  const now = new Date();
-  const today = ISO(now);
-  const next24 = ISO(addDays(now, 1));
-  const next30 = ISO(addDays(now, 30));
-
-  // --- Tasks (today) ---
-  const tasksRaw = await kvGetArray(todayKey(now));
-  const tasks = dedupeTasks(tasksRaw);
-
-  // --- Calendar (we already have a router that returns next 30 days) ---
-  let allNext30 = [];
   try {
-    const url = `${baseURL(req)}/api/router?action=calendar.events`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (data?.ok && Array.isArray(data.events)) allNext30 = data.events;
-  } catch { /* ignore */ }
+    if (req.method !== "GET") return res.status(405).json({ ok:false, error:"use_get" });
 
-  // --- Appointments: next 24h ---
-  const appts = allNext30.filter((e) => e?.start >= today && e?.start < next24);
+    const today = ensureDay(req);
+    const todayKey = `tasks_array:${today}`;
+    const tasks = (await kvGetArray(todayKey)) || [];
 
-  // --- Bills (simple heuristic: $ in summary happening today) ---
-  const billsToday = allNext30.filter(
-    (e) => e?.start === today && /\$\s*[\d,.]+/.test(e?.summary || "")
-  );
+    // next-24h calendar
+    const token = await getAccessToken(["https://www.googleapis.com/auth/calendar.readonly"]);
+    const timeMin = new Date();
+    const timeMax = addDays(timeMin, 1);
+    const events = await calendarListEvents(token, {
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
+      maxResults: 20,
+    });
 
-  // --- Subscriptions (next 30d) ---
-  const subsRaw = allNext30
-    .filter((e) => e?.start >= today && e?.start <= next30 && looksLikeSub(e?.summary || ""))
-    .map((e) => {
-      const amount = firstDollar(e.summary);
-      const dueSoon = e.start <= ISO(addDays(now, 14));
-      return { date: e.start, summary: e.summary || "(no title)", amount, dueSoon };
-    })
-    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    // bills today (from calendar summary heuristics)
+    const billsToday = (events.items || [])
+      .filter(e => (e.summary || "").match(/\b(bill|payment|due|renew|autopay)\b/i))
+      .filter(e => (e.start?.date || e.start?.dateTime || "").slice(0,10) === today);
 
-  // --- Build message ---
-  const lines = [];
-  lines.push(`🌅 Morning Upload`);
-  lines.push(`🗓️ ${today}`);
-  lines.push("");
+    // subscriptions (saved by gmail-subscriptions-scan)
+    const subs = (await kvGet("subs_next30")) || [];
+    const subsSorted = subs
+      .map(x => ({
+        ...x,
+        dueIn: x.renewalDate ? daysUntil(x.renewalDate) : null
+      }))
+      .sort((a, b) => {
+        const da = a.renewalDate ? new Date(a.renewalDate).getTime() : Infinity;
+        const db = b.renewalDate ? new Date(b.renewalDate).getTime() : Infinity;
+        return da - db;
+      });
 
-  // Tasks (de-duped)
-  lines.push(`📋 Gigs Today (${tasks.length})`);
-  if (tasks.length) {
-    lines.push(...tasks.map((t) => `• ${t.title}${t.bucket ? ` (${t.bucket})` : ""}`));
-  } else {
-    lines.push("• None");
+    // Render
+    const lines = [];
+    lines.push("🌅 Morning Upload");
+    lines.push(`🗓️ ${today}`);
+    lines.push("");
+
+    // Tasks
+    lines.push(`📋 Gigs Today (${tasks.length})`);
+    if (!tasks.length) {
+      lines.push("• None");
+    } else {
+      for (const t of tasks.slice(0, 20)) {
+        const b = t.bucket ? (labels[t.bucket] || t.bucket) : null;
+        lines.push(`• ${t.title}${b ? ` (${b})` : ""}`);
+      }
+      if (tasks.length > 20) lines.push(`• …and ${tasks.length - 20} more`);
+    }
+    lines.push("");
+
+    // Appointments
+    const appts = (events.items || []).filter(e => !/\b(bill|payment|due|renew|autopay)\b/i.test(e.summary || ""));
+    lines.push(`📆 Time Slots (next 24h) (${appts.length})`);
+    if (!appts.length) {
+      lines.push("• None");
+    } else {
+      for (const e of appts.slice(0, 10)) {
+        const start = (e.start?.date || e.start?.dateTime || "").slice(0,16).replace("T"," ");
+        lines.push(`• ${start} — ${e.summary || "(no title)"}`);
+      }
+      if (appts.length > 10) lines.push(`• …and ${appts.length - 10} more`);
+    }
+    lines.push("");
+
+    // Bills (heuristic from calendar)
+    lines.push(`💸 Bills Today (${billsToday.length})`);
+    if (!billsToday.length) {
+      lines.push("• None");
+    } else {
+      for (const e of billsToday.slice(0, 10)) {
+        lines.push(`• ${e.summary}`);
+      }
+    }
+    lines.push("");
+
+    // Subscriptions
+    lines.push("**Finances → Subscriptions** (next 30 days)");
+    if (!subsSorted.length) {
+      lines.push("• None detected");
+    } else {
+      for (const s of subsSorted.slice(0, 12)) {
+        const due = s.renewalDate ? ` — due ${s.renewalDate}` : " — due (date tbd)";
+        const amt = (s.amount != null) ? ` for $${s.amount}` : "";
+        const badge = (s.dueIn != null && s.dueIn <= 14) ? " ⚠️" : "";
+        lines.push(`• ${s.service}${amt}${due}${badge}`);
+      }
+      if (subsSorted.length > 12) lines.push(`• …and ${subsSorted.length - 12} more`);
+    }
+    lines.push("");
+    lines.push("Add any new gigs for today? If so, tell me:");
+    lines.push("• Title (required)");
+    lines.push("• Bucket (optional)");
+    lines.push("• When/notes (optional)");
+
+    return res.status(200).json({ ok:true, message: lines.join("\n") });
+  } catch (err) {
+    return res.status(200).json({ ok:false, error:"morning_failed", details: err?.message || String(err) });
   }
-  lines.push("");
-
-  // Appointments next 24h
-  lines.push(`📆 Time Slots (next 24h) (${appts.length})`);
-  if (appts.length) {
-    lines.push(...appts.map((e) => `• ${e.summary || "(no title)"} — ${fmt(e.start)}`));
-  } else {
-    lines.push("• None");
-  }
-  lines.push("");
-
-  // Bills today
-  lines.push(`💸 Bills Today (${billsToday.length})`);
-  if (billsToday.length) {
-    lines.push(...billsToday.map((b) => `• ${b.summary} — ${fmt(b.start)}`));
-  } else {
-    lines.push("• None");
-  }
-  lines.push("");
-
-  // Subscriptions next 30d (+ highlight ≤14d)
-  lines.push(`**Finances → Subscriptions** (next 30 days)`);
-  if (subsRaw.length) {
-    lines.push(
-      ...subsRaw.map((s) =>
-        `• ${s.summary} — ${fmt(s.date)}${s.amount ? ` (${s.amount})` : ""}${s.dueSoon ? "  ‼️ due ≤14d" : ""}`
-      )
-    );
-  } else {
-    lines.push("• None detected");
-  }
-  lines.push("");
-
-  // Prompt
-  lines.push(`Add any new gigs for today? If so, tell me:`);
-  lines.push(`• Title (required)`);
-  lines.push(`• Bucket (optional)`);
-  lines.push(`• When/notes (optional)`);
-
-  const message = lines.join("\n");
-  return res.json({
-    ok: true,
-    today,
-    counts: {
-      tasks: tasks.length,
-      appts: appts.length,
-      billsToday: billsToday.length,
-      subs30: subsRaw.length,
-    },
-    message,
-  });
 }
+
+export default { handler };
